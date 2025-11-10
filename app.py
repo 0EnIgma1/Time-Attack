@@ -57,7 +57,6 @@ def start_new_run(route_id, notes=""):
     return run_id
 
 def record_checkpoint():
-    """Robust, state-based timing checkpoint logic"""
     run_id = st.session_state.active_run
     cp_idx = st.session_state.current_checkpoint_index
     all_cps = st.session_state.checkpoints_data
@@ -83,7 +82,12 @@ def record_checkpoint():
         run_start = datetime.fromisoformat(run_details['start_time'])
         total_time = (now - run_start).total_seconds()
         db.complete_run(run_id, total_time)
+
+        # Reset active run state and rerun UI
+        cancel_run()
+        st.rerun()
         return True, total_time
+
     return False, None
 
 def cancel_run():
@@ -92,6 +96,20 @@ def cancel_run():
     st.session_state.current_checkpoint_index = 0
     st.session_state.checkpoints_data = []
     st.session_state.ghost_data = None
+
+
+def get_latest_active_run():
+    # Search DB for latest run with is_completed=0 (active run)
+    conn = db.get_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""SELECT id, route_id FROM runs WHERE is_completed=0 ORDER BY start_time DESC LIMIT 1""")
+        row = cursor.fetchone()
+        if row:
+            return {'id': row[0], 'route_id': row[1]}
+        return None
+    finally:
+        conn.close()
 
 # Main app
 st.title("🏁 GRID - Time Attack")
@@ -102,6 +120,17 @@ page = st.sidebar.radio("Navigation", ["🏁 Active Run", "🛣️ Manage Routes
 
 # ==================== ACTIVE RUN PAGE ====================
 if page == "🏁 Active Run":
+
+    # On first load/after disconnect:
+    if st.session_state.active_run is None:
+        latest = get_latest_active_run()
+        if latest:
+            st.session_state.active_run = latest['id']
+            st.session_state.checkpoints_data = db.get_checkpoints(latest['route_id'])
+            cptimes = db.get_run_checkpoint_times(latest['id'])
+            st.session_state.current_checkpoint_index = len(cptimes)
+            st.session_state.ghost_data = db.get_live_ghost_data(latest['route_id'])
+
     if st.session_state.active_run is None:
         st.header("Start New Run")
         routes = db.get_routes()
