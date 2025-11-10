@@ -17,18 +17,12 @@ st.set_page_config(page_title="Time Attack Tracker", page_icon="🏁", layout="w
 # Initialize session state
 if 'active_run' not in st.session_state:
     st.session_state.active_run = None
-if 'run_start_time' not in st.session_state:
-    st.session_state.run_start_time = None
-if 'last_checkpoint_time' not in st.session_state:
-    st.session_state.last_checkpoint_time = None
 if 'current_checkpoint_index' not in st.session_state:
     st.session_state.current_checkpoint_index = 0
 if 'checkpoints_data' not in st.session_state:
     st.session_state.checkpoints_data = []
 if 'ghost_data' not in st.session_state:
     st.session_state.ghost_data = None
-if 'cumulative_time' not in st.session_state:
-    st.session_state.cumulative_time = 0
 
 def format_time(seconds):
     """Format seconds into MM:SS.ms format"""
@@ -54,48 +48,50 @@ def format_delta_minutes(seconds):
     return f"{sign}{minutes:.2f} mins"
 
 def start_new_run(route_id, notes=""):
-    """Initialize a new run"""
+    """Initialize a new run and store start_time in db"""
     run_id = db.start_run(route_id, notes)
     st.session_state.active_run = run_id
-    st.session_state.run_start_time = time.time()
-    st.session_state.last_checkpoint_time = time.time()
     st.session_state.current_checkpoint_index = 0
     st.session_state.checkpoints_data = db.get_checkpoints(route_id)
-    st.session_state.cumulative_time = 0
-
-    # Load ghost data (personal best)
     st.session_state.ghost_data = db.get_live_ghost_data(route_id)
-
     return run_id
 
 def record_checkpoint():
-    """Record checkpoint time"""
-    current_time = time.time()
-    segment_time = current_time - st.session_state.last_checkpoint_time
-    st.session_state.cumulative_time += segment_time
+    """Robust, state-based timing checkpoint logic"""
+    run_id = st.session_state.active_run
+    cp_idx = st.session_state.current_checkpoint_index
+    all_cps = st.session_state.checkpoints_data
 
-    checkpoint = st.session_state.checkpoints_data[st.session_state.current_checkpoint_index]
-    db.record_checkpoint_time(st.session_state.active_run, checkpoint['id'], segment_time)
+    run_details = db.get_run_details(run_id)
+    prev_cp_times = db.get_run_checkpoint_times(run_id)
+    
+    # Get last event time
+    if cp_idx == 0:
+        last_time = datetime.fromisoformat(run_details['start_time'])
+    else:
+        last_time = datetime.fromisoformat(str(prev_cp_times[-1]['time_reached']))
 
-    st.session_state.last_checkpoint_time = current_time
+    now = datetime.now()
+    segment_time = (now - last_time).total_seconds()
+
+    checkpoint = all_cps[cp_idx]
+    db.record_checkpoint_time(run_id, checkpoint['id'], segment_time)
     st.session_state.current_checkpoint_index += 1
 
-    # Check if this was the last checkpoint
-    if st.session_state.current_checkpoint_index >= len(st.session_state.checkpoints_data):
-        total_time = current_time - st.session_state.run_start_time
-        db.complete_run(st.session_state.active_run, total_time)
+    # If last checkpoint, complete run and write total time
+    if st.session_state.current_checkpoint_index >= len(all_cps):
+        run_start = datetime.fromisoformat(run_details['start_time'])
+        total_time = (now - run_start).total_seconds()
+        db.complete_run(run_id, total_time)
         return True, total_time
     return False, None
 
 def cancel_run():
     """Cancel the current run"""
     st.session_state.active_run = None
-    st.session_state.run_start_time = None
-    st.session_state.last_checkpoint_time = None
     st.session_state.current_checkpoint_index = 0
     st.session_state.checkpoints_data = []
     st.session_state.ghost_data = None
-    st.session_state.cumulative_time = 0
 
 # Main app
 st.title("🏁 GRID - Time Attack")
@@ -108,7 +104,6 @@ page = st.sidebar.radio("Navigation", ["🏁 Active Run", "🛣️ Manage Routes
 if page == "🏁 Active Run":
     if st.session_state.active_run is None:
         st.header("Start New Run")
-
         routes = db.get_routes()
         if not routes:
             st.warning("⚠️ No routes configured. Please create a route first in 'Manage Routes'.")
@@ -118,9 +113,7 @@ if page == "🏁 Active Run":
                 route_options = {r['name']: r['id'] for r in routes}
                 selected_route_name = st.selectbox("Select Route", list(route_options.keys()))
                 selected_route_id = route_options[selected_route_name]
-
                 notes = st.text_input("Notes (optional)", placeholder="e.g., Heavy traffic, rainy weather")
-
             with col2:
                 st.write("")
                 st.write("")
@@ -131,16 +124,24 @@ if page == "🏁 Active Run":
                     else:
                         start_new_run(selected_route_id, notes)
                         st.rerun()
-
     else:
         # Active run interface
         st.header("⏱️ Run in Progress")
 
-        current_time = time.time()
-        elapsed = current_time - st.session_state.run_start_time
-        segment_elapsed = current_time - st.session_state.last_checkpoint_time
+        run_details = db.get_run_details(st.session_state.active_run)
+        prev_cp_times = db.get_run_checkpoint_times(st.session_state.active_run)
 
-        # Real-time timer display
+        now = datetime.now()
+        # Calculate total elapsed time based on start_time in db:
+        elapsed = (now - datetime.fromisoformat(run_details['start_time'])).total_seconds()
+
+        # Last event time:
+        if st.session_state.current_checkpoint_index == 0:
+            last_time = datetime.fromisoformat(run_details['start_time'])
+        else:
+            last_time = datetime.fromisoformat(str(prev_cp_times[-1]['time_reached']))
+        segment_elapsed = (now - last_time).total_seconds()
+
         col1, col2, col3 = st.columns(3)
         with col1:
             st.metric("Total Time", format_time(elapsed))
@@ -154,22 +155,18 @@ if page == "🏁 Active Run":
         if st.session_state.ghost_data and st.session_state.current_checkpoint_index > 0:
             st.markdown("---")
             st.subheader("👻 Ghost Comparison (vs Personal Best)")
-
-            # Calculate delta
             ghost_cumulative = 0
             for i in range(st.session_state.current_checkpoint_index):
                 if i < len(st.session_state.ghost_data):
                     ghost_cumulative = st.session_state.ghost_data[i]['cumulative_time']
-
-            delta = st.session_state.cumulative_time - ghost_cumulative
+            delta = elapsed - ghost_cumulative
             delta_color = "red" if delta > 0 else "green"
-
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                st.metric("Your Cumulative Time", format_time(st.session_state.cumulative_time))
-            with col2:
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                st.metric("Your Cumulative Time", format_time(elapsed))
+            with c2:
                 st.metric("Ghost Cumulative Time", format_time(ghost_cumulative))
-            with col3:
+            with c3:
                 st.metric("Delta", format_delta(delta))
                 if delta > 0:
                     st.markdown(f":{delta_color}[Behind ghost by {abs(delta):.3f}s]")
@@ -193,15 +190,10 @@ if page == "🏁 Active Run":
                         st.rerun()
                     else:
                         st.rerun()
-
             with col2:
                 if st.button("❌ Cancel Run", use_container_width=True):
                     cancel_run()
                     st.rerun()
-
-        # Auto-refresh for real-time timer
-        time.sleep(0.1)
-        st.rerun()
 
 # ==================== MANAGE ROUTES PAGE ====================
 elif page == "🛣️ Manage Routes":
