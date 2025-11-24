@@ -1,6 +1,6 @@
 import streamlit as st
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
@@ -25,8 +25,7 @@ if 'ghost_data' not in st.session_state:
     st.session_state.ghost_data = None
 
 def format_time(seconds):
-    """Format seconds into MM:SS.ms format"""
-    if seconds is None:
+    if seconds is None or pd.isna(seconds):
         return "--:--"
     minutes = int(seconds // 60)
     secs = seconds % 60
@@ -66,11 +65,11 @@ def record_checkpoint():
     
     # Get last event time
     if cp_idx == 0:
-        last_time = datetime.fromisoformat(run_details['start_time'])
+        last_time = datetime.fromisoformat(run_details['start_time'].replace("Z", "+00:00"))
     else:
-        last_time = datetime.fromisoformat(str(prev_cp_times[-1]['time_reached']))
+        last_time = datetime.fromisoformat(str(prev_cp_times[-1]['time_reached']).replace("Z", "+00:00"))
 
-    now = datetime.now()
+    now = datetime.now(timezone.utc)
     segment_time = (now - last_time).total_seconds()
 
     checkpoint = all_cps[cp_idx]
@@ -79,7 +78,7 @@ def record_checkpoint():
 
     # If last checkpoint, complete run and write total time
     if st.session_state.current_checkpoint_index >= len(all_cps):
-        run_start = datetime.fromisoformat(run_details['start_time'])
+        run_start = datetime.fromisoformat(run_details['start_time'].replace("Z", "+00:00"))
         total_time = (now - run_start).total_seconds()
         db.complete_run(run_id, total_time)
 
@@ -98,19 +97,6 @@ def cancel_run():
     st.session_state.ghost_data = None
 
 
-def get_latest_active_run():
-    # Search DB for latest run with is_completed=0 (active run)
-    conn = db.get_connection()
-    try:
-        cursor = conn.cursor()
-        cursor.execute("""SELECT id, route_id FROM runs WHERE is_completed=0 ORDER BY start_time DESC LIMIT 1""")
-        row = cursor.fetchone()
-        if row:
-            return {'id': row[0], 'route_id': row[1]}
-        return None
-    finally:
-        conn.close()
-
 # Main app
 st.title("🏁 GRID - Time Attack")
 st.markdown("---")
@@ -123,7 +109,7 @@ if page == "🏁 Active Run":
 
     # On first load/after disconnect:
     if st.session_state.active_run is None:
-        latest = get_latest_active_run()
+        latest = db.get_latest_active_run()
         if latest:
             st.session_state.active_run = latest['id']
             st.session_state.checkpoints_data = db.get_checkpoints(latest['route_id'])
@@ -160,15 +146,15 @@ if page == "🏁 Active Run":
         run_details = db.get_run_details(st.session_state.active_run)
         prev_cp_times = db.get_run_checkpoint_times(st.session_state.active_run)
 
-        now = datetime.now()
+        now = datetime.now(timezone.utc)
         # Calculate total elapsed time based on start_time in db:
-        elapsed = (now - datetime.fromisoformat(run_details['start_time'])).total_seconds()
+        elapsed = (now - datetime.fromisoformat(run_details['start_time'].replace("Z", "+00:00"))).total_seconds()
 
         # Last event time:
         if st.session_state.current_checkpoint_index == 0:
-            last_time = datetime.fromisoformat(run_details['start_time'])
+            last_time = datetime.fromisoformat(run_details['start_time'].replace("Z", "+00:00"))
         else:
-            last_time = datetime.fromisoformat(str(prev_cp_times[-1]['time_reached']))
+            last_time = datetime.fromisoformat(str(prev_cp_times[-1]['time_reached']).replace("Z", "+00:00"))
         segment_elapsed = (now - last_time).total_seconds()
 
         col1, col2, col3 = st.columns(3)
@@ -323,7 +309,7 @@ elif page == "📊 Analytics Dashboard":
             with col1:
                 st.metric("Best Time", format_time(pb['time_seconds']))
             with col2:
-                st.metric("Date", pb['date'].split()[0])
+                st.metric("Date", pb['date'].split("T")[0])
         else:
             st.info("No completed runs yet.")
 
@@ -437,7 +423,7 @@ elif page == "👻 Run Analysis":
             run_options = {}
             for idx, row in history.iterrows():
                 # Parse the datetime string
-                dt = datetime.fromisoformat(row['start_time'])
+                dt = datetime.fromisoformat(row['start_time'].replace("Z", "+00:00"))
 
                 # Format: DD/MM/YYYY - Day - Total time
                 date_str = dt.strftime("%d/%m/%Y")
@@ -472,7 +458,7 @@ elif page == "👻 Run Analysis":
                     else:
                         st.metric("Status", "Completed")
                 with col3:
-                    st.metric("Date", run_details['start_time'].split()[0])
+                    st.metric("Date", run_details['start_time'].split("T")[0])
 
                 if run_details['notes']:
                     st.info(f"**Notes:** {run_details['notes']}")

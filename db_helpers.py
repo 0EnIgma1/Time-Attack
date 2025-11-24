@@ -1,361 +1,217 @@
-
-import sqlite3
+from supabase import create_client
 from datetime import datetime
-from typing import List, Dict, Tuple, Optional
+import os
 import pandas as pd
+from dotenv import load_dotenv
+load_dotenv()
+
+SUPABASE_URL = os.environ.get("SUPABASE_URL")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
+supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 class TimeAttackDB:
-    def __init__(self, db_path: str = "time_attack.db"):
-        self.db_path = db_path
+    # ----- Route management -----
+    def create_route(self, name, description=""):
+        result = supabase.table("routes").insert(
+            {"name": name, "description": description}
+        ).execute()
+        return result.data[0]['id']
 
-    def get_connection(self):
-        return sqlite3.connect(self.db_path)
+    def get_routes(self):
+        routes = supabase.table("routes").select("*").order("name").execute().data
+        return routes
 
-    # Route management
-    def create_route(self, name: str, description: str = "") -> int:
-        """Create a new route and return its ID"""
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        try:
-            cursor.execute("INSERT INTO routes (name, description) VALUES (?, ?)", (name, description))
-            route_id = cursor.lastrowid
-            conn.commit()
-            return route_id
-        finally:
-            conn.close()
+    def delete_route(self, route_id):
+        supabase.table("routes").delete().eq("id", route_id).execute()
 
-    def get_routes(self) -> List[Dict]:
-        """Get all routes"""
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        try:
-            cursor.execute("SELECT id, name, description, created_at FROM routes ORDER BY name")
-            routes = []
-            for row in cursor.fetchall():
-                routes.append({
-                    'id': row[0],
-                    'name': row[1],
-                    'description': row[2],
-                    'created_at': row[3]
-                })
-            return routes
-        finally:
-            conn.close()
+    # ----- Checkpoint management -----
+    def add_checkpoint(self, route_id, name, sequence_order):
+        supabase.table("checkpoints").insert(
+            {"route_id": route_id, "name": name, "sequence_order": sequence_order}
+        ).execute()
 
-    def delete_route(self, route_id: int):
-        """Delete a route and all associated data"""
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        try:
-            cursor.execute("DELETE FROM routes WHERE id = ?", (route_id,))
-            conn.commit()
-        finally:
-            conn.close()
+    def get_checkpoints(self, route_id):
+        return (
+            supabase.table("checkpoints")
+            .select("*")
+            .eq("route_id", route_id)
+            .order("sequence_order")
+            .execute()
+            .data
+        )
 
-    # Checkpoint management
-    def add_checkpoint(self, route_id: int, name: str, sequence_order: int):
-        """Add a checkpoint to a route"""
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        try:
-            cursor.execute(
-                "INSERT INTO checkpoints (route_id, name, sequence_order) VALUES (?, ?, ?)",
-                (route_id, name, sequence_order)
-            )
-            conn.commit()
-        finally:
-            conn.close()
+    def delete_checkpoint(self, checkpoint_id):
+        supabase.table("checkpoints").delete().eq("id", checkpoint_id).execute()
 
-    def get_checkpoints(self, route_id: int) -> List[Dict]:
-        """Get all checkpoints for a route in sequence order"""
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        try:
-            cursor.execute(
-                "SELECT id, name, sequence_order FROM checkpoints WHERE route_id = ? ORDER BY sequence_order",
-                (route_id,)
-            )
-            checkpoints = []
-            for row in cursor.fetchall():
-                checkpoints.append({
-                    'id': row[0],
-                    'name': row[1],
-                    'sequence_order': row[2]
-                })
-            return checkpoints
-        finally:
-            conn.close()
+    # ----- Run management -----
+    def start_run(self, route_id, notes=""):
+        now = datetime.utcnow().isoformat()
+        result = supabase.table("runs").insert(
+            {"route_id": route_id, "start_time": now, "notes": notes, "is_completed": 0}
+        ).execute()
+        return result.data[0]['id']
 
-    def delete_checkpoint(self, checkpoint_id: int):
-        """Delete a checkpoint"""
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        try:
-            cursor.execute("DELETE FROM checkpoints WHERE id = ?", (checkpoint_id,))
-            conn.commit()
-        finally:
-            conn.close()
+    def complete_run(self, run_id, total_time_seconds):
+        now = datetime.utcnow().isoformat()
+        supabase.table("runs").update(
+            {"total_time_seconds": total_time_seconds, "is_completed": 1}
+        ).eq("id", run_id).execute()
 
-    # Run management
-    def start_run(self, route_id: int, notes: str = "") -> int:
-        """Start a new run and return its ID"""
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        try:
-            start_time = datetime.now()
-            cursor.execute(
-                "INSERT INTO runs (route_id, start_time, notes) VALUES (?, ?, ?)",
-                (route_id, start_time, notes)
-            )
-            run_id = cursor.lastrowid
-            conn.commit()
-            return run_id
-        finally:
-            conn.close()
+    def delete_run(self, run_id):
+        supabase.table("runs").delete().eq("id", run_id).execute()
 
-    def complete_run(self, run_id: int, total_time_seconds: float):
-        """Complete a run with total time"""
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        try:
-            end_time = datetime.now()
-            cursor.execute(
-                "UPDATE runs SET end_time = ?, total_time_seconds = ?, is_completed = 1 WHERE id = ?",
-                (end_time, total_time_seconds, run_id)
-            )
-            conn.commit()
-        finally:
-            conn.close()
+    # ----- Checkpoint times -----
+    def record_checkpoint_time(self, run_id, checkpoint_id, segment_time_seconds):
+        now = datetime.utcnow().isoformat()
+        supabase.table("checkpoint_times").insert(
+            {
+                "run_id": run_id,
+                "checkpoint_id": checkpoint_id,
+                "time_reached": now,
+                "segment_time": segment_time_seconds,
+            }
+        ).execute()
 
-    def record_checkpoint_time(self, run_id: int, checkpoint_id: int, segment_time_seconds: float):
-        """Record time for reaching a checkpoint"""
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        try:
-            time_reached = datetime.now()
-            cursor.execute(
-                "INSERT INTO checkpoint_times (run_id, checkpoint_id, time_reached, segment_time_seconds) VALUES (?, ?, ?, ?)",
-                (run_id, checkpoint_id, time_reached, segment_time_seconds)
-            )
-            conn.commit()
-        finally:
-            conn.close()
+    # ----- Retrieving run/checkpoint/run details for logic -----
+    def get_latest_active_run(self):
+        res = (
+            supabase.table("runs")
+            .select("id, route_id")
+            .eq("is_completed", 0)
+            .order("start_time", desc=True)
+            .limit(1)
+            .execute()
+        )
+        return res.data[0] if res.data else None
 
-    def get_current_run(self, run_id: int) -> Optional[Dict]:
-        """Get current run details"""
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        try:
-            cursor.execute(
-                "SELECT id, route_id, start_time, is_completed FROM runs WHERE id = ?",
-                (run_id,)
-            )
-            row = cursor.fetchone()
-            if row:
-                return {
-                    'id': row[0],
-                    'route_id': row[1],
-                    'start_time': datetime.fromisoformat(row[2]),
-                    'is_completed': bool(row[3])
-                }
-            return None
-        finally:
-            conn.close()
+    def get_run_details(self, run_id):
+        res = (
+            supabase.table("runs")
+            .select("*")
+            .eq("id", run_id)
+            .limit(1)
+            .execute()
+        )
+        return res.data[0] if res.data else None
 
-    # Analytics
-    def get_personal_best(self, route_id: int) -> Optional[Dict]:
-        """Get personal best time for a route"""
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        try:
-            cursor.execute("""
-                SELECT id, MIN(total_time_seconds) as best_time, start_time 
-                FROM runs 
-                WHERE route_id = ? AND is_completed = 1
-                GROUP BY route_id
-            """, (route_id,))
-            row = cursor.fetchone()
-            if row and row[1]:
-                return {
-                    'run_id': row[0],
-                    'time_seconds': row[1],
-                    'date': row[2]
-                }
-            return None
-        finally:
-            conn.close()
-
-    def get_run_history(self, route_id: int) -> pd.DataFrame:
-        """Get run history for a route"""
-        conn = self.get_connection()
-        try:
-            query = """
-                SELECT 
-                    r.id,
-                    r.start_time,
-                    r.total_time_seconds,
-                    r.notes,
-                    DATE(r.start_time) as run_date
-                FROM runs r
-                WHERE r.route_id = ? AND r.is_completed = 1
-                ORDER BY r.start_time DESC
-            """
-            return pd.read_sql_query(query, conn, params=(route_id,))
-        finally:
-            conn.close()
-
-    def get_checkpoint_analysis(self, route_id: int) -> pd.DataFrame:
-        """Get checkpoint performance analysis"""
-        conn = self.get_connection()
-        try:
-            query = """
-                SELECT 
-                    c.name as checkpoint_name,
-                    c.sequence_order,
-                    AVG(ct.segment_time_seconds) as avg_time,
-                    MIN(ct.segment_time_seconds) as best_time,
-                    MAX(ct.segment_time_seconds) as worst_time,
-                    COUNT(*) as times_completed
-                FROM checkpoints c
-                LEFT JOIN checkpoint_times ct ON c.id = ct.checkpoint_id
-                LEFT JOIN runs r ON ct.run_id = r.id
-                WHERE c.route_id = ? AND r.is_completed = 1
-                GROUP BY c.id, c.name, c.sequence_order
-                ORDER BY c.sequence_order
-            """
-            return pd.read_sql_query(query, conn, params=(route_id,))
-        finally:
-            conn.close()
-
-    # NEW: Ghost comparison methods
-    def get_run_checkpoint_times(self, run_id: int) -> List[Dict]:
-        """Get all checkpoint times for a specific run"""
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        try:
-            cursor.execute("""
-                SELECT 
-                    c.id,
-                    c.name,
-                    c.sequence_order,
-                    ct.segment_time_seconds,
-                    ct.time_reached
-                FROM checkpoint_times ct
-                JOIN checkpoints c ON ct.checkpoint_id = c.id
-                WHERE ct.run_id = ?
-                ORDER BY c.sequence_order
-            """, (run_id,))
-
-            checkpoints = []
-            cumulative_time = 0
-            for row in cursor.fetchall():
-                cumulative_time += row[3]
-                checkpoints.append({
-                    'checkpoint_id': row[0],
-                    'name': row[1],
-                    'sequence_order': row[2],
-                    'segment_time': row[3],
-                    'cumulative_time': cumulative_time,
-                    'time_reached': row[4]
-                })
-            return checkpoints
-        finally:
-            conn.close()
-
-    def get_ghost_comparison(self, run_id: int, ghost_run_id: int) -> pd.DataFrame:
-        """Compare two runs checkpoint by checkpoint"""
-        current_checkpoints = self.get_run_checkpoint_times(run_id)
-        ghost_checkpoints = self.get_run_checkpoint_times(ghost_run_id)
-
-        comparison = []
-        for current, ghost in zip(current_checkpoints, ghost_checkpoints):
-            segment_delta = current['segment_time'] - ghost['segment_time']
-            cumulative_delta = current['cumulative_time'] - ghost['cumulative_time']
-
-            comparison.append({
-                'checkpoint_name': current['name'],
-                'sequence_order': current['sequence_order'],
-                'current_segment': current['segment_time'],
-                'ghost_segment': ghost['segment_time'],
-                'segment_delta': segment_delta,
-                'current_cumulative': current['cumulative_time'],
-                'ghost_cumulative': ghost['cumulative_time'],
-                'cumulative_delta': cumulative_delta
+    def get_run_checkpoint_times(self, run_id):
+        cps = (
+            supabase.table("checkpoint_times")
+            .select("*, checkpoint_id")
+            .eq("run_id", run_id)
+            .order("id")  # preserves original sequence order if ids come in order
+            .execute()
+            .data
+        )
+        if not cps:
+            return []
+        # For cumulative time calc
+        checkpoints = []
+        cumulative_time = 0
+        for cp in cps:
+            seg_time = cp["segment_time"]
+            cumulative_time += seg_time if seg_time is not None else 0
+            checkpoints.append({
+                "checkpoint_id": cp.get("checkpoint_id"),
+                "segment_time": seg_time,
+                "cumulative_time": cumulative_time,
+                "time_reached": cp.get("time_reached")
             })
+        return checkpoints
 
+    # ----- Analytics -----
+    def get_personal_best(self, route_id):
+        res = (
+            supabase.table("runs")
+            .select("id, total_time_seconds, start_time")
+            .eq("route_id", route_id)
+            .eq("is_completed", 1)
+            .order("total_time_seconds")
+            .limit(1)
+            .execute()
+        )
+        if res.data and res.data[0]['total_time_seconds'] is not None:
+            return {
+                "run_id": res.data[0]["id"],
+                "time_seconds": res.data[0]["total_time_seconds"],
+                "date": res.data[0]["start_time"]
+            }
+        return None
+
+    def get_run_history(self, route_id):
+        res = (
+            supabase.table("runs")
+            .select("*")
+            .eq("route_id", route_id)
+            .eq("is_completed", 1)
+            .order("start_time", desc=True)
+            .execute()
+        )
+        df = pd.DataFrame(res.data)
+        return df if not df.empty else pd.DataFrame([])
+
+    def get_checkpoint_analysis(self, route_id):
+        # Aggregation has to be done in pandas since Supabase-py does not support SQL aggregation
+        cps = (
+            supabase.table("checkpoints")
+            .select("id, name, sequence_order")
+            .eq("route_id", route_id)
+            .order("sequence_order")
+            .execute()
+            .data
+        )
+        if not cps:
+            return pd.DataFrame([])
+
+        all_segs = []
+        for cp in cps:
+            ct = (
+                supabase.table("checkpoint_times")
+                .select("segment_time")
+                .eq("checkpoint_id", cp["id"])
+                .execute().data
+            )
+            times = [t['segment_time'] for t in ct if t['segment_time'] is not None]
+            all_segs.append({
+                "Checkpoint": cp['name'],
+                "Order": cp['sequence_order'],
+                "avg_time": sum(times)/len(times) if times else None,
+                "best_time": min(times) if times else None,
+                "worst_time": max(times) if times else None,
+                "Completed": len(times)
+            })
+        return pd.DataFrame(all_segs)
+
+    # ----- Ghost logic -----
+    def get_ghost_comparison(self, run_id, ghost_run_id):
+        current = self.get_run_checkpoint_times(run_id)
+        ghost = self.get_run_checkpoint_times(ghost_run_id)
+        comparison = []
+        for curr, gh in zip(current, ghost):
+            seg_delta = (curr['segment_time'] or 0) - (gh['segment_time'] or 0)
+            cum_delta = (curr['cumulative_time'] or 0) - (gh['cumulative_time'] or 0)
+            comparison.append({
+                "checkpoint_name": curr.get("name", "Unknown"),  # Add name here from current checkpoint info
+                "sequence_order": curr.get("sequence_order", -1),
+                "current_segment": curr["segment_time"],
+                "ghost_segment": gh["segment_time"],
+                "segment_delta": seg_delta,
+                "current_cumulative": curr["cumulative_time"],
+                "ghost_cumulative": gh["cumulative_time"],
+                "cumulative_delta": cum_delta
+            })
         return pd.DataFrame(comparison)
 
-    def get_pb_ghost_comparison(self, run_id: int) -> Optional[pd.DataFrame]:
-        """Compare a run against personal best (ghost)"""
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        try:
-            # Get route_id for this run
-            cursor.execute("SELECT route_id FROM runs WHERE id = ?", (run_id,))
-            route_result = cursor.fetchone()
-            if not route_result:
-                return None
-
-            route_id = route_result[0]
-
-            # Get personal best run
-            pb = self.get_personal_best(route_id)
-            if not pb or pb['run_id'] == run_id:
-                return None  # No PB or this IS the PB
-
-            return self.get_ghost_comparison(run_id, pb['run_id'])
-        finally:
-            conn.close()
-
-    def get_run_details(self, run_id: int) -> Optional[Dict]:
-        """Get detailed information about a specific run"""
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        try:
-            cursor.execute("""
-                SELECT 
-                    r.id,
-                    r.route_id,
-                    r.start_time,
-                    r.end_time,
-                    r.total_time_seconds,
-                    r.notes,
-                    r.is_completed,
-                    rt.name as route_name
-                FROM runs r
-                JOIN routes rt ON r.route_id = rt.id
-                WHERE r.id = ?
-            """, (run_id,))
-
-            row = cursor.fetchone()
-            if row:
-                return {
-                    'id': row[0],
-                    'route_id': row[1],
-                    'start_time': row[2],
-                    'end_time': row[3],
-                    'total_time_seconds': row[4],
-                    'notes': row[5],
-                    'is_completed': bool(row[6]),
-                    'route_name': row[7]
-                }
+    def get_pb_ghost_comparison(self, run_id):
+        run = self.get_run_details(run_id)
+        if not run:
             return None
-        finally:
-            conn.close()
+        pb = self.get_personal_best(run["route_id"])
+        if not pb or pb['run_id'] == run_id:
+            return None
+        return self.get_ghost_comparison(run_id, pb['run_id'])
 
-    def delete_run(self, run_id: int):
-        """Delete a run and all associated checkpoint times"""
-        conn = self.get_connection()
-        cursor = conn.cursor()
-        try:
-            cursor.execute("DELETE FROM runs WHERE id = ?", (run_id,))
-            conn.commit()
-        finally:
-            conn.close()
-
-
-    def get_live_ghost_data(self, route_id: int) -> Optional[List[Dict]]:
-        """Get personal best checkpoint times for live ghost comparison"""
+    def get_live_ghost_data(self, route_id):
         pb = self.get_personal_best(route_id)
         if not pb:
             return None
